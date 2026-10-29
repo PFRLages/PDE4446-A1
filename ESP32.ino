@@ -1,246 +1,229 @@
-#include <Arduino.h>
-#include <Wire.h>
-#include <vl53l4cx_class.h>
+#include <SoftwareSerial.h>
 
-#define SDA_PIN 8
-#define SCL_PIN 9
+// ESP32 TX -> Mirto pin 11
+SoftwareSerial sensorSerial(11, 13);  // RX, TX
 
-#define XSHUT_PIN 18
+int averageDistance = 0;
 
-// Mirto communication
-#define MIRTO_TX 17
+// Motor pins
+const int AIN2 = 5;
+const int BIN1 = 6;
 
-// Bridge detection output
-#define BRIDGE_OUT 16
+// Bridge signal from ESP32
+const int BRIDGE_IN = 12;
 
-// HC-SR04
-#define TRIG_PIN 4
-#define ECHO_PIN 5
+// Encoder pins
+const int LEFT_ENCODER = 3;
+const int RIGHT_ENCODER = 2;
 
-VL53L4CX sensor_vl53l4cx_sat(&Wire, -1);
-HardwareSerial MirtoSerial(1);
+// Encoder counts
+volatile long leftCount = 0;
+volatile long rightCount = 0;
 
-const int NUM_SAMPLES = 20;
+// Distance calculation
+const float COUNT_PER_MM = 2.091;
 
-bool vlDone = false;
+// Final safety buffer before the barrier
+const float FINAL_BUFFER_MM = 50.0;
 
-bool initVL53()
-{
-    Serial.println("Resetting VL53L4CX...");
+// Speed settings
+const int NORMAL_SPEED = 200;
+const int BRIDGE_SPEED = 100;
 
-    pinMode(XSHUT_PIN, OUTPUT);
+const int MIN_SPEED = 70;
+const int MAX_SPEED = 255;
 
-    // Force sensor OFF
-    digitalWrite(XSHUT_PIN, LOW);
-    delay(500);
+int targetSpeed = NORMAL_SPEED;
+int currentSpeed = BRIDGE_SPEED;
 
-    // Turn sensor back ON
-    digitalWrite(XSHUT_PIN, HIGH);
-    delay(1000);
+// Stop calculations
+float stopDistance = 0;
+float targetCount = 0;
+int times = 0;
 
-    Wire.begin(SDA_PIN, SCL_PIN);
-    delay(200);
+// Straight-line correction
+const float KP = 2.0;
 
-    sensor_vl53l4cx_sat.begin();
+long error = 0;
 
-    VL53L4CX_Error status =
-        sensor_vl53l4cx_sat.InitSensor(0x29);
+long segmentLeftStart = 0;
+long segmentRightStart = 0;
 
-    Serial.print("Init status = ");
-    Serial.println((int)status);
-
-    if (status != 0)
-    {
-        return false;
-    }
-
-    sensor_vl53l4cx_sat.VL53L4CX_StartMeasurement();
-
-    delay(500);
-
-    Serial.println("VL53L4CX Ready");
-
-    return true;
+// Encoder interrupts
+void leftEncoder() {
+  leftCount++;
 }
 
-int getAverageDistance()
-{
-    long sum = 0;
-    int count = 0;
-
-    for (int sample = 0; sample < NUM_SAMPLES; sample++)
-    {
-        uint8_t ready = 0;
-
-        unsigned long startTime = millis();
-
-        while (!ready)
-        {
-            sensor_vl53l4cx_sat
-                .VL53L4CX_GetMeasurementDataReady(&ready);
-
-            if (millis() - startTime > 3000)
-            {
-                Serial.println("Measurement timeout");
-                return -1;
-            }
-
-            delay(1);
-        }
-
-        VL53L4CX_MultiRangingData_t data;
-
-        sensor_vl53l4cx_sat
-            .VL53L4CX_GetMultiRangingData(&data);
-
-        int bestDistance = -1;
-
-        for (int obj = 0; obj < data.NumberOfObjectsFound; obj++)
-        {
-            int distance =
-                data.RangeData[obj].RangeMilliMeter;
-
-            int status =
-                data.RangeData[obj].RangeStatus;
-
-            Serial.print("Obj ");
-            Serial.print(obj);
-
-            Serial.print(" Status=");
-            Serial.print(status);
-
-            Serial.print(" Distance=");
-            Serial.println(distance);
-
-            // Ignore ghost reflections
-            if (distance >= 100 &&
-                distance <= 6000)
-            {
-                if (distance > bestDistance)
-                {
-                    bestDistance = distance;
-                }
-            }
-        }
-
-        if (bestDistance > 0)
-        {
-            sum += bestDistance;
-            count++;
-
-            Serial.print("Selected = ");
-            Serial.print(bestDistance);
-            Serial.println(" mm");
-        }
-
-        sensor_vl53l4cx_sat
-            .VL53L4CX_ClearInterruptAndStartMeasurement();
-    }
-
-    if (count == 0)
-    {
-        return -1;
-    }
-
-    return (int)(sum / count);
+void rightEncoder() {
+  rightCount++;
 }
 
-float getUltrasonicDistanceCM()
-{
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
+void setup() {
+  delay(2000);
 
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
+  Serial.begin(9600);
+  sensorSerial.begin(9600);
 
-    digitalWrite(TRIG_PIN, LOW);
+  Serial.println("Waiting for distance from ESP32...");
 
-    long duration =
-        pulseIn(ECHO_PIN, HIGH, 30000);
+  while (averageDistance < 100) {
+    if (sensorSerial.available() > 0) {
+      String s = sensorSerial.readStringUntil('\n');
 
-    if (duration == 0)
-    {
-        return -1;
+      Serial.print("Received: [");
+      Serial.print(s);
+      Serial.println("]");
+
+      averageDistance = s.toInt();
+
+      Serial.print("Parsed value: ");
+      Serial.println(averageDistance);
     }
+  }
 
-    return duration * 0.0343f / 2.0f;
+  Serial.print("Received distance = ");
+  Serial.println(averageDistance);
+
+  // Distance between the 6 stop positions
+  stopDistance =
+    (averageDistance / 6.0) * COUNT_PER_MM;
+
+  targetCount = stopDistance;
+
+  pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+
+  pinMode(BRIDGE_IN, INPUT);
+
+  pinMode(LEFT_ENCODER, INPUT_PULLUP);
+  pinMode(RIGHT_ENCODER, INPUT_PULLUP);
+
+  attachInterrupt(
+    digitalPinToInterrupt(LEFT_ENCODER),
+    leftEncoder,
+    RISING);
+
+  attachInterrupt(
+    digitalPinToInterrupt(RIGHT_ENCODER),
+    rightEncoder,
+    RISING);
+
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, 0);
+
+  noInterrupts();
+  leftCount = 0;
+  rightCount = 0;
+  interrupts();
+
+  segmentLeftStart = 0;
+  segmentRightStart = 0;
+
+  Serial.print("Stop distance counts = ");
+  Serial.println(stopDistance);
+
+  Serial.print("Final buffer counts = ");
+  Serial.println(FINAL_BUFFER_MM * COUNT_PER_MM);
 }
 
-void setup()
-{
-    Serial.begin(115200);
+void loop() {
+  driveForward();
 
-    MirtoSerial.begin(
-        9600,
-        SERIAL_8N1,
-        -1,
-        MIRTO_TX);
-
-    pinMode(BRIDGE_OUT, OUTPUT);
-    digitalWrite(BRIDGE_OUT, LOW);
-
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
-
-    delay(1000);
-
-    if (!initVL53())
-    {
-        Serial.println("VL53L4CX FAILED");
-
-        while (true)
-        {
-            delay(1000);
-        }
-    }
+  while (true) {
+  }
 }
 
-void loop()
-{
-    if (!vlDone)
-    {
-        delay(2000);
+void driveForward() {
+  while (true) {
+    if (digitalRead(BRIDGE_IN) == HIGH) {
+      targetSpeed = BRIDGE_SPEED;
+    } else {
+      targetSpeed = NORMAL_SPEED;
+    }
 
-        int avgDistance =
-            getAverageDistance();
+    long left;
+    long right;
 
-        Serial.print("Average VL distance = ");
-        Serial.print(avgDistance);
-        Serial.println(" mm");
+    noInterrupts();
+    left = leftCount;
+    right = rightCount;
+    interrupts();
 
-        if (avgDistance > 0)
-        {
-            MirtoSerial.println(avgDistance);
+    float averageCount = (left + right) / 2.0;
 
-            Serial.print("Sent to Mirto: ");
-            Serial.print(avgDistance);
-            Serial.println(" mm");
+    if (currentSpeed < targetSpeed) {
+      currentSpeed += 10;
+
+      if (currentSpeed > targetSpeed) {
+        currentSpeed = targetSpeed;
+      }
+    } else if (currentSpeed > targetSpeed) {
+      currentSpeed -= 10;
+
+      if (currentSpeed < targetSpeed) {
+        currentSpeed = targetSpeed;
+      }
+    }
+
+    if (averageCount >= targetCount) {
+      stop();
+
+      Serial.print("Stop error: ");
+      Serial.println(error);
+
+      if (times < 5) {
+        delay(5000);
+
+        segmentLeftStart = left;
+        segmentRightStart = right;
+
+        times++;
+
+        if (times < 5) {
+          targetCount += stopDistance;
+        } else {
+          float finalBufferCounts =
+            FINAL_BUFFER_MM * COUNT_PER_MM;
+
+          targetCount +=
+            stopDistance - finalBufferCounts;
         }
-        else
-        {
-            Serial.println("No valid VL distance");
-        }
 
-        sensor_vl53l4cx_sat
-            .VL53L4CX_StopMeasurement();
+        currentSpeed = BRIDGE_SPEED;
 
-        Serial.println("VL53L4CX stopped");
-
-        vlDone = true;
+        continue;
+      } else {
+        Serial.println("Finished");
+        return;
+      }
     }
 
-    float hcDistance =
-        getUltrasonicDistanceCM();
+    error =
+      (left - segmentLeftStart) - (right - segmentRightStart);
 
-    if (hcDistance >= 25.0f &&
-        hcDistance <= 80.0f)
-    {
-        digitalWrite(BRIDGE_OUT, HIGH);
-    }
-    else
-    {
-        digitalWrite(BRIDGE_OUT, LOW);
-    }
+    float correction =
+      constrain(KP * error, -80, 80);
 
-    delay(100);
+    int leftSpeed =
+      constrain(
+        currentSpeed - correction,
+        MIN_SPEED,
+        MAX_SPEED);
+
+    int rightSpeed =
+      constrain(
+        currentSpeed + correction,
+        MIN_SPEED,
+        MAX_SPEED);
+
+    analogWrite(AIN2, leftSpeed);
+    analogWrite(BIN1, rightSpeed);
+
+    delay(10);
+  }
+}
+
+void stop() {
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, 0);
 }
