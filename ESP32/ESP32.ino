@@ -30,11 +30,9 @@ bool initVL53()
 
     pinMode(XSHUT_PIN, OUTPUT);
 
-    // Force sensor OFF
     digitalWrite(XSHUT_PIN, LOW);
     delay(500);
 
-    // Turn sensor back ON
     digitalWrite(XSHUT_PIN, HIGH);
     delay(1000);
 
@@ -63,12 +61,12 @@ bool initVL53()
     return true;
 }
 
-int getAverageDistance()
+int getMedianDistance()
 {
-    long sum = 0;
+    int distances[NUM_SAMPLES];
     int count = 0;
 
-    for (int sample = 0; sample < NUM_SAMPLES; sample++)
+    while (count < NUM_SAMPLES)
     {
         uint8_t ready = 0;
 
@@ -95,7 +93,9 @@ int getAverageDistance()
 
         int bestDistance = -1;
 
-        for (int obj = 0; obj < data.NumberOfObjectsFound; obj++)
+        for (int obj = 0;
+             obj < data.NumberOfObjectsFound;
+             obj++)
         {
             int distance =
                 data.RangeData[obj].RangeMilliMeter;
@@ -112,7 +112,7 @@ int getAverageDistance()
             Serial.print(" Distance=");
             Serial.println(distance);
 
-            // Ignore ghost reflections
+            // Ignore impossible values
             if (distance >= 100 &&
                 distance <= 6000)
             {
@@ -125,10 +125,10 @@ int getAverageDistance()
 
         if (bestDistance > 0)
         {
-            sum += bestDistance;
+            distances[count] = bestDistance;
             count++;
 
-            Serial.print("Selected = ");
+            Serial.print("Accepted = ");
             Serial.print(bestDistance);
             Serial.println(" mm");
         }
@@ -137,12 +137,43 @@ int getAverageDistance()
             .VL53L4CX_ClearInterruptAndStartMeasurement();
     }
 
-    if (count == 0)
+    // Sort samples
+    for (int i = 0; i < count - 1; i++)
     {
-        return -1;
+        for (int j = i + 1; j < count; j++)
+        {
+            if (distances[j] < distances[i])
+            {
+                int temp = distances[i];
+                distances[i] = distances[j];
+                distances[j] = temp;
+            }
+        }
     }
 
-    return (int)(sum / count);
+    Serial.println("Sorted samples:");
+
+    for (int i = 0; i < count; i++)
+    {
+        Serial.println(distances[i]);
+    }
+
+    // Median
+    int medianDistance;
+
+    if (count % 2 == 0)
+    {
+        medianDistance =
+            (distances[count / 2 - 1] +
+             distances[count / 2]) / 2;
+    }
+    else
+    {
+        medianDistance =
+            distances[count / 2];
+    }
+
+    return medianDistance;
 }
 
 float getUltrasonicDistanceCM()
@@ -201,19 +232,19 @@ void loop()
     {
         delay(2000);
 
-        int avgDistance =
-            getAverageDistance();
+        int medianDistance =
+            getMedianDistance();
 
-        Serial.print("Average VL distance = ");
-        Serial.print(avgDistance);
+        Serial.print("Median VL distance = ");
+        Serial.print(medianDistance);
         Serial.println(" mm");
 
-        if (avgDistance > 0)
+        if (medianDistance > 0)
         {
-            MirtoSerial.println(avgDistance);
+            MirtoSerial.println(medianDistance);
 
             Serial.print("Sent to Mirto: ");
-            Serial.print(avgDistance);
+            Serial.print(medianDistance);
             Serial.println(" mm");
         }
         else
