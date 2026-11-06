@@ -26,16 +26,16 @@ volatile long leftCount = 0;
 volatile long rightCount = 0;
 
 // Distance calculation
-const float COUNT_PER_MM = 2.133;
+const float COUNT_PER_MM = 2.1;
 
 // Final safety buffer before the barrier
-const float FINAL_BUFFER_MM = 0.0;
+const float FINAL_BUFFER_MM = 35.0;
 
 // Speed settings
-const int NORMAL_SPEED = 150;
-const int BRIDGE_SPEED = 70;
+const int NORMAL_SPEED = 120;
+const int BRIDGE_SPEED = 80;
 
-const int MIN_SPEED = 70;
+const int MIN_SPEED = 80;
 const int MAX_SPEED = 255;
 
 // Smooth acceleration/deceleration
@@ -45,7 +45,7 @@ const unsigned long SPEED_UPDATE_MS = 500;
 unsigned long lastSpeedUpdate = 0;
 
 // Steering trim
-const int LEFT_TRIM = 5;
+const int LEFT_TRIM = 40;
 
 // Stop calculations
 float stopDistance = 0;
@@ -306,8 +306,8 @@ void driveForward() {
     float correction =
       constrain(
         KP * error,
-        -80,
-        80);
+        -120,
+        120);
 
     int leftSpeed =
       constrain(
